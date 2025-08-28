@@ -1,81 +1,62 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import random
 import time
-import plotly.express as px
 import joblib
+import tensorflow as tf  # ADDED: Import TensorFlow
 import warnings
-warnings.filterwarnings('ignore')
-warnings.filterwarnings('ignore', category=DeprecationWarning)
 
-
-
-# import files
+# --- Local Imports ---
 import database
 import random_num
 
+warnings.filterwarnings('ignore')
+warnings.filterwarnings('ignore', category=DeprecationWarning)
 
-model = None
-scaler = None
+# --- Feature Columns (No Change) ---
 feature_columns = [
-    'set1',
-    'set2',
-    'sensor2',
-    'sensor3',
-    'sensor4',
-    'sensor6',
-    'sensor7',
-    'sensor8',
-    'sensor9',
-    'sensor11',
-    'sensor12',
-    'sensor13',
-    'sensor14',
-    'sensor15',
-    'sensor17',
-    'sensor20',
-    'sensor21'
+    'set1', 'set2', 'sensor2', 'sensor3', 'sensor4', 'sensor6', 'sensor7',
+    'sensor8', 'sensor9', 'sensor11', 'sensor12', 'sensor13', 'sensor14',
+    'sensor15', 'sensor17', 'sensor20', 'sensor21'
 ]
 
-
-
-# functiosn
-
+# --- Model Loading (CHANGED) ---
+# Use Streamlit's caching to load models only once.
+@st.cache_resource
 def load_models():
+    """Loads the Keras model and the scikit-learn scaler."""
+    # Load the Keras model using TensorFlow's recommended function
+    model = joblib.load('model.pkl')
     
-    with open('model.pkl', 'rb') as f:
-        global model
-        model = joblib.load(f) 
-
+    # The scaler is not a TF model, so joblib is still correct for it
     with open('scaler.pkl', 'rb') as f:
-        global scaler
         scaler = joblib.load(f)
+        
+    print("Successfully loaded the model and scaler.")
+    return model, scaler
 
-    print("successfully load the models")
+# --- Prediction Function (No Change in Logic) ---
+def predict_rul(model, scaler, data):
+    # 1. Scale the data
+    data_scaled = scaler.transform(data)
 
+    # 2. Reshape for the model (e.g., for LSTM: [samples, timesteps, features])
+    data_reshaped = data_scaled.reshape(1, data_scaled.shape[0], data_scaled.shape[1])
 
-
-def predict_rul(data):
-    #1 scale the data
-    data = scaler.transform(data)
-
-    # reshap
-    # print(feature_columns)
-    data = data.reshape(1, 10, len(feature_columns))
-
-    predict = model.predict(data);
-
-    print("successfully predict the value", predict[0][0])
+    # 3. Predict
+    prediction = model.predict(data_reshaped)
     
-    return predict[0][0]
+    print(f"Successfully predicted the value: {prediction[0][0]}")
+    return prediction[0][0]
 
-
-
+# --- Main Application Logic ---
 def main():
-    st.title("Real-time Sensor Data Prediction UI")
+    st.title("Jet Engine RUL: Real-time Prediction")
 
-    # Control for starting/stopping the prediction loop.
+    # Load the model and scaler
+    model, scaler = load_models()
+
+    # --- Session State Initialization (No Change) ---
     if 'run' not in st.session_state:
         st.session_state.run = False
     if 'time_points' not in st.session_state:
@@ -85,54 +66,48 @@ def main():
     if 'iteration' not in st.session_state:
         st.session_state.iteration = 1
 
+    # --- UI Controls (No Change) ---
     col1, col2 = st.columns(2)
-    if col1.button("Predict"):
+    if col1.button("Start Prediction", type="primary"):
         st.session_state.run = True
-    if col2.button("Stop"):
+    if col2.button("Stop Prediction"):
         st.session_state.run = False
 
-    # Placeholders for charts and prediction text.
-    rul_text_placeholder = st.empty()            # For displaying the predicted RUL
-    time_vs_rul_chart_placeholder = st.empty()   # For time vs. predicted RUL (line chart)
+    # --- Placeholders (No Change) ---
+    rul_metric_placeholder = st.empty()
+    chart_placeholder = st.empty()
 
-    # =======================
-    # Main Loop (runs while "Predict" is active)
-    # =======================
+    # --- Main Loop (CHANGED: Pass model and scaler to predict_rul) ---
     while st.session_state.run:
-        # 1. Generate sensor readings and insert into DB.
+        # 1. Generate new data and store it
         sensor_data = random_num.generate_sensor_data()
         database.insert_sensor_data(sensor_data)
         
-        # 2. Fetch the last 10 rows and pad if needed.
+        # 2. Fetch the time-series window (last 10 records)
         df_data = database.fetch_last_10()
         df_data = database.pad_data(df_data, 10)
         
-        # 3. Compute a dummy prediction.
-        prediction = predict_rul(df_data[feature_columns])
+        # 3. Make a prediction
+        prediction = predict_rul(model, scaler, df_data[feature_columns])
         
-        # 6. Update the time vs. predicted RUL chart.
-        # Use the iteration count as the time axis.
+        # 4. Update session state for charting
         st.session_state.time_points.append(st.session_state.iteration)
         st.session_state.predicted_rul_list.append(prediction)
         st.session_state.iteration += 1
-        # Create a DataFrame for the line chart.
-        df_time_vs_rul = pd.DataFrame({
-            "Time": st.session_state.time_points,
+        
+        # Create a DataFrame for the line chart
+        df_chart = pd.DataFrame({
+            "Time Step": st.session_state.time_points,
             "Predicted RUL": st.session_state.predicted_rul_list
         })
 
-        # Use st.line_chart to update the chart.
-        time_vs_rul_chart_placeholder.line_chart(df_time_vs_rul.set_index("Time"))
+        # 5. Display the latest prediction and update the chart
+        rul_metric_placeholder.metric(label="Predicted Remaining Useful Life (RUL)", value=f"{prediction:.2f} cycles")
+        chart_placeholder.line_chart(df_chart.set_index("Time Step"))
         
-        # 5. Display the predicted RUL.
-        rul_text_placeholder.text(f"Predicted RUL: {prediction:.2f}")
-
-        
-        time.sleep(1)
+        time.sleep(1) # Pause for 1 second
     else:
-        st.write("Press the Predict button to start real-time predictions.")
-
+        st.write("Press the 'Start Prediction' button to begin.")
 
 if __name__ == '__main__':
-    load_models()
     main()
